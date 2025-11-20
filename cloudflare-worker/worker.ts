@@ -54,6 +54,7 @@ type PrepareStreamBody = {
 interface Env {
   API_KEY?: string;
   ALLOWED_ORIGINS?: string;
+  ALLOW_ALL_ORIGINS?: string; // Set to 'true' in wrangler vars for dev to allow all origins
   STREAM_RULES?: KVNamespace; // Optional KV for storing stream rules
 }
 
@@ -79,6 +80,8 @@ function validateApiKey(request: Request, env: Env): boolean {
  * Validate request origin
  */
 function validateOrigin(request: Request, env: Env): boolean {
+  // If explicitly configured to allow all origins (dev-only use), allow
+  if (env.ALLOW_ALL_ORIGINS && env.ALLOW_ALL_ORIGINS.toLowerCase() === 'true') return true;
   if (!env.ALLOWED_ORIGINS) return true; // No origin restriction
 
   const origin = request.headers.get('Origin');

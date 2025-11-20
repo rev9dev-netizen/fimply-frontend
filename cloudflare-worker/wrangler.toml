@@ -14,6 +14,8 @@ compatibility_date = "2024-01-01"
 # Environment variables
 [vars]
 # ALLOWED_ORIGINS = "https://pstream.mov,https://yourdomain.com,http://localhost:5173"
+# To allow all origins for quick local testing, set this flag to true and then remove it in production
+# ALLOW_ALL_ORIGINS = "true"
 
 # Secrets (set via wrangler secret put)
 # API_KEY - Set via: wrangler secret put API_KEY

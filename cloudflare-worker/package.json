@@ -1,0 +1,19 @@
+{
+  "name": "pstream-proxy-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker proxy for P-Stream",
+  "main": "worker.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "keywords": ["cloudflare", "worker", "proxy", "pstream"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.94.0"
+  }
+}

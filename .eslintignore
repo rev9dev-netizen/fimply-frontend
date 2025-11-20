@@ -1,0 +1,2 @@
+# Cloudflare Worker directory (has its own linting)
+cloudflare-worker/

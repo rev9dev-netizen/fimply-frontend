@@ -1,0 +1,30 @@
+name = "pstream-proxy-worker"
+main = "worker.ts"
+compatibility_date = "2024-01-01"
+
+# Account ID - Replace with your Cloudflare account ID
+# account_id = "your-account-id-here"
+
+# KV Namespace for storing stream rules (optional)
+# Uncomment and create KV namespace if you want to use it
+# [[kv_namespaces]]
+# binding = "STREAM_RULES"
+# id = "your-kv-namespace-id"
+
+# Environment variables
+[vars]
+# ALLOWED_ORIGINS = "https://pstream.mov,https://yourdomain.com"
+
+# Secrets (set via wrangler secret put)
+# API_KEY - Set via: wrangler secret put API_KEY
+# Example: wrangler secret put API_KEY
+# Then enter your secret key when prompted
+
+# Routes (optional - for custom domain)
+# routes = [
+#   { pattern = "worker.yourdomain.com/*", zone_name = "yourdomain.com" }
+# ]
+
+# Workers Paid plan settings (optional)
+# [limits]
+# cpu_ms = 50

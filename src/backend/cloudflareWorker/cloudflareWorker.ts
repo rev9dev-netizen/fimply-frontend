@@ -100,7 +100,25 @@ async function workerFetch<T>(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      console.error(`Worker request failed: ${response.status}`);
+      // Read the response body and log it to help diagnose why the worker returned a
+      // non-OK status (e.g., 403 'Origin not allowed', 403 'URL not allowed')
+      const targetUrl = (body && (body as any).url) ?? "(unknown target)";
+      console.error(
+        `Worker responded non-OK for endpoint ${endpoint} targeting ${targetUrl}`,
+      );
+      try {
+        const text = await response.text();
+        try {
+          const json = JSON.parse(text);
+          console.error(`Worker request failed: ${response.status}`, json);
+        } catch {
+          console.error(`Worker request failed: ${response.status}`, text);
+        }
+      } catch (err) {
+        console.error(
+          `Worker request failed: ${response.status} (failed to read body)`,
+        );
+      }
       return null;
     }
 

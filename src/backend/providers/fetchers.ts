@@ -1,3 +1,4 @@
+/* eslint-disable prettier/prettier */
 import {
   Fetcher,
   makeSimpleProxyFetcher,
@@ -63,9 +64,9 @@ async function fetchButWithApiTokens(
     input,
     init
       ? {
-          ...init,
-          headers,
-        }
+        ...init,
+        headers,
+      }
       : undefined,
   );
   const newApiToken = response.headers.get("X-Token");
@@ -137,8 +138,14 @@ export function makeCloudflareWorkerFetcher() {
       bodyType: getBodyTypeFromBody(ops.body),
     });
 
-    if (!result?.success)
+    if (!result?.success) {
+      console.error(
+        "Cloudflare Worker returned an error for url:",
+        url,
+        result?.error,
+      );
       throw new Error(`worker error: ${result?.error || "Unknown error"}`);
+    }
 
     const res = result.response!;
     return {

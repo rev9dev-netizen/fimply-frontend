@@ -10,13 +10,13 @@
 // Types matching the frontend extension interface
 type ExtensionBaseResponse<T = object> =
   | {
-      success: true;
-      data?: T;
-    }
+    success: true;
+    data?: T;
+  }
   | {
-      success: false;
-      error: string;
-    };
+    success: false;
+    error: string;
+  };
 
 type HelloResponse = {
   success: true;
@@ -70,7 +70,7 @@ const corsHeaders = {
  */
 function validateApiKey(request: Request, env: Env): boolean {
   if (!env.API_KEY) return true; // No API key required
-  
+
   const apiKey = request.headers.get('X-API-Key');
   return apiKey === env.API_KEY;
 }
@@ -80,42 +80,52 @@ function validateApiKey(request: Request, env: Env): boolean {
  */
 function validateOrigin(request: Request, env: Env): boolean {
   if (!env.ALLOWED_ORIGINS) return true; // No origin restriction
-  
+
   const origin = request.headers.get('Origin');
   if (!origin) return false;
-  
+
   const allowedOrigins = env.ALLOWED_ORIGINS.split(',').map(o => o.trim());
   return allowedOrigins.includes(origin) || allowedOrigins.includes('*');
 }
 
 /**
  * Check if URL is allowed (basic security)
+ * Returns { allowed: boolean, reason?: string }
  */
-function isUrlAllowed(url: string): boolean {
+function isUrlAllowed(url: string): { allowed: boolean; reason?: string } {
   try {
     const parsedUrl = new URL(url);
-    
+
     // Block localhost and private IPs
     const hostname = parsedUrl.hostname.toLowerCase();
     if (
-      hostname === 'localhost' ||
-      hostname.startsWith('127.') ||
-      hostname.startsWith('192.168.') ||
-      hostname.startsWith('10.') ||
-      hostname.startsWith('172.16.') ||
-      hostname.endsWith('.local')
+      hostname === "localhost" ||
+      hostname.startsWith("127.") ||
+      hostname.startsWith("192.168.") ||
+      hostname.startsWith("10.") ||
+      hostname.startsWith("172.16.") ||
+      hostname.endsWith(".local")
     ) {
-      return false;
+      return {
+        allowed: false,
+        reason: `Blocked private/local address: ${hostname}`,
+      };
     }
-    
+
     // Only allow http and https
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      return false;
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      return {
+        allowed: false,
+        reason: `Invalid protocol: ${parsedUrl.protocol}`,
+      };
     }
-    
-    return true;
-  } catch {
-    return false;
+
+    return { allowed: true };
+  } catch (error) {
+    return {
+      allowed: false,
+      reason: `Invalid URL format: ${error instanceof Error ? error.message : "Unknown error"}`,
+    };
   }
 }
 
@@ -124,25 +134,25 @@ function isUrlAllowed(url: string): boolean {
  */
 function prepareRequestBody(body: any, bodyType?: string): BodyInit | null {
   if (!body) return null;
-  
+
   switch (bodyType) {
     case 'string':
       return String(body);
-    
+
     case 'FormData':
       const formData = new FormData();
       if (Array.isArray(body)) {
         body.forEach(([key, value]) => formData.append(key, value));
       }
       return formData;
-    
+
     case 'URLSearchParams':
       const params = new URLSearchParams();
       if (Array.isArray(body)) {
         body.forEach(([key, value]) => params.append(key, value));
       }
       return params;
-    
+
     case 'object':
     default:
       return JSON.stringify(body);
@@ -159,7 +169,7 @@ async function handleHello(): Promise<Response> {
     allowed: true,
     hasPermission: true,
   };
-  
+
   return new Response(JSON.stringify(response), {
     headers: {
       'Content-Type': 'application/json',
@@ -174,7 +184,7 @@ async function handleHello(): Promise<Response> {
 async function handleMakeRequest(request: Request): Promise<Response> {
   try {
     const body: MakeRequestBody = await request.json();
-    
+
     // Validate URL
     if (!isUrlAllowed(body.url)) {
       return new Response(
@@ -191,39 +201,39 @@ async function handleMakeRequest(request: Request): Promise<Response> {
         }
       );
     }
-    
+
     // Prepare request options
     const requestOptions: RequestInit = {
       method: body.method || 'GET',
       headers: body.headers || {},
       redirect: 'follow',
     };
-    
+
     // Add body if present
     if (body.body) {
       requestOptions.body = prepareRequestBody(body.body, body.bodyType);
     }
-    
+
     // Make the actual request
     const targetResponse = await fetch(body.url, requestOptions);
-    
+
     // Read response body
     const responseBody = await targetResponse.text();
     let parsedBody: any = responseBody;
-    
+
     // Try to parse as JSON
     try {
       parsedBody = JSON.parse(responseBody);
     } catch {
       // Keep as text if not JSON
     }
-    
+
     // Extract headers
     const responseHeaders: Record<string, string> = {};
     targetResponse.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
-    
+
     // Build response
     const response: MakeRequestResponse = {
       success: true,
@@ -234,7 +244,7 @@ async function handleMakeRequest(request: Request): Promise<Response> {
         body: parsedBody,
       },
     };
-    
+
     return new Response(JSON.stringify(response), {
       headers: {
         'Content-Type': 'application/json',
@@ -266,7 +276,7 @@ async function handleMakeRequest(request: Request): Promise<Response> {
 async function handlePrepareStream(request: Request, env: Env): Promise<Response> {
   try {
     const body: PrepareStreamBody = await request.json();
-    
+
     // Optionally store in KV for future use
     if (env.STREAM_RULES) {
       await env.STREAM_RULES.put(
@@ -275,7 +285,7 @@ async function handlePrepareStream(request: Request, env: Env): Promise<Response
         { expirationTtl: 3600 } // 1 hour
       );
     }
-    
+
     return new Response(
       JSON.stringify({ success: true }),
       {
@@ -317,12 +327,12 @@ function handleOptions(): Response {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    
+
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
       return handleOptions();
     }
-    
+
     // Validate API key
     if (!validateApiKey(request, env)) {
       return new Response(
@@ -339,7 +349,7 @@ export default {
         }
       );
     }
-    
+
     // Validate origin
     if (!validateOrigin(request, env)) {
       return new Response(
@@ -356,27 +366,27 @@ export default {
         }
       );
     }
-    
+
     // Route requests
     switch (url.pathname) {
       case '/':
       case '/hello':
         return handleHello();
-      
+
       case '/makeRequest':
         if (request.method !== 'POST') {
           return new Response('Method not allowed', { status: 405 });
         }
         return handleMakeRequest(request);
-      
+
       case '/prepareStream':
         if (request.method !== 'POST') {
           return new Response('Method not allowed', { status: 405 });
         }
         return handlePrepareStream(request, env);
-      
+
       default:
-        return new Response('Not found', { 
+        return new Response('Not found', {
           status: 404,
           headers: corsHeaders,
         });

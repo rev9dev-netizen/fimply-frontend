@@ -1,0 +1,669 @@
+# P-Stream Frontend Architecture - Complete Walkthrough
+
+## Overview
+
+P-Stream is a streaming web application that allows users to watch movies and TV shows. The frontend is built with **React**, **TypeScript**, **Vite**, and uses the **@p-stream/providers** package for scraping streaming sources. The architecture is designed to work in two modes:
+
+1. **With Browser Extension** - Full functionality with CORS bypass
+2. **Without Extension** - Limited functionality using proxy servers
+
+---
+
+## Table of Contents
+
+1. [Project Structure](#project-structure)
+2. [Core Architecture](#core-architecture)
+3. [The Extension Dependency](#the-extension-dependency)
+4. [How Streaming Works](#how-streaming-works)
+5. [Provider System](#provider-system)
+6. [Request Flow](#request-flow)
+7. [Key Components](#key-components)
+8. [State Management](#state-management)
+
+---
+
+## Project Structure
+
+```
+fimply-frontend/
+├── src/
+│   ├── backend/           # Backend integration logic
+│   │   ├── extension/     # Extension communication
+│   │   ├── providers/     # Provider configuration
+│   │   ├── helpers/       # API helpers
+│   │   └── metadata/      # TMDB metadata
+│   ├── components/        # React components
+│   │   └── player/        # Video player components
+│   ├── hooks/             # Custom React hooks
+│   ├── pages/             # Page components
+│   ├── stores/            # Zustand state stores
+│   ├── utils/             # Utility functions
+│   └── index.tsx          # Application entry point
+├── package.json
+└── vite.config.mts
+```
+
+---
+
+## Core Architecture
+
+### Technology Stack
+
+- **Framework**: React 18.3.1
+- **Build Tool**: Vite 5.4.21
+- **State Management**: Zustand 4.5.7
+- **Routing**: React Router DOM 6.30.1
+- **Video Player**: HLS.js 1.6.13
+- **Provider Package**: @p-stream/providers (from GitHub)
+- **Extension Communication**: @plasmohq/messaging 0.6.2
+
+### Key Dependencies
+
+```json
+{
+  "@p-stream/providers": "github:p-stream/providers#production",
+  "@plasmohq/messaging": "^0.6.2",
+  "hls.js": "^1.6.13",
+  "zustand": "^4.5.7"
+}
+```
+
+---
+
+## The Extension Dependency
+
+### Why the Extension is Needed
+
+The browser extension is **critical** for full functionality because:
+
+#### 1. **CORS (Cross-Origin Resource Sharing) Bypass**
+
+Streaming providers host content on different domains. Browsers block cross-origin requests for security. The extension:
+- Runs in a privileged context with access to `webRequest` API
+- Can modify request headers (Origin, Referer, User-Agent)
+- Can bypass CORS restrictions entirely
+
+#### 2. **Request Header Manipulation**
+
+Many streaming sources require specific headers:
+```typescript
+// From streams.ts
+function buildHeadersFromStream(stream: Stream): Record<string, string> {
+  const headers: Record<string, string> = {};
+  Object.entries(stream.headers ?? {}).forEach((entry) => {
+    headers[entry[0]] = entry[1];
+  });
+  Object.entries(stream.preferredHeaders ?? {}).forEach((entry) => {
+    headers[entry[0]] = entry[1];
+  });
+  return headers;
+}
+```
+
+The extension applies these headers to:
+- Stream playlist requests (HLS/m3u8)
+- Video segment requests
+- Embed page requests
+
+#### 3. **Dynamic Rule Management**
+
+```typescript
+// From streams.ts
+export async function prepareStream(stream: Stream) {
+  await setDomainRule({
+    ruleId: RULE_IDS.PREPARE_STREAM,
+    targetDomains: extractDomainsFromStream(stream),
+    requestHeaders: buildHeadersFromStream(stream),
+  });
+}
+```
+
+The extension uses Chrome's `declarativeNetRequest` API to:
+- Set up domain-specific rules
+- Apply headers to all requests to streaming domains
+- Enable consistent IP for requests
+
+---
+
+## How Streaming Works
+
+### Architecture Flow
+
+```mermaid
+graph TB
+    A[User Selects Media] --> B{Extension Active?}
+    B -->|Yes| C[Use Extension Fetcher]
+    B -->|No| D[Use Proxy Fetcher]
+    
+    C --> E[Provider Scraping]
+    D --> F[Provider API Server]
+    
+    E --> G[Get Stream URLs]
+    F --> G
+    
+    G --> H[prepareStream]
+    H --> I[Extension Sets Headers]
+    I --> J[HLS Player Loads Stream]
+    
+    D --> K[Proxy Forwards Requests]
+    K --> J
+```
+
+### Step-by-Step Streaming Process
+
+#### Step 1: Extension Detection
+
+```typescript
+// From utils/extension.ts
+export async function getExtensionState(): Promise<ExtensionStatus> {
+  const info = await extensionInfo();
+  if (!info) return "unknown";           // Can't talk to extension
+  if (!info.success) return "failed";     // Extension failed to respond
+  if (!info.allowed) return "disallowed"; // Extension not enabled on page
+  if (!info.hasPermission) return "noperms"; // No permissions
+  if (!isAllowedExtensionVersion(info.version)) return "outdated";
+  return "success"; // Extension ready!
+}
+```
+
+#### Step 2: Provider Selection
+
+```typescript
+// From backend/providers/providers.ts
+export function getProviders() {
+  if (isExtensionActiveCached()) {
+    // WITH EXTENSION
+    return makeProviders({
+      fetcher: makeStandardFetcher(fetch),
+      proxiedFetcher: makeExtensionFetcher(),
+      target: targets.BROWSER_EXTENSION,
+      consistentIpForRequests: true,
+    });
+  }
+
+  // WITHOUT EXTENSION
+  setupM3U8Proxy();
+  return makeProviders({
+    fetcher: makeStandardFetcher(fetch),
+    proxiedFetcher: makeLoadBalancedSimpleProxyFetcher(),
+    target: targets.BROWSER,
+  });
+}
+```
+
+#### Step 3: Scraping Process
+
+```typescript
+// From hooks/useProviderScrape.tsx
+const startScraping = async (media: ScrapeMedia) => {
+  const providerApiUrl = getLoadbalancedProviderApiUrl();
+  
+  if (providerApiUrl && !isExtensionActiveCached()) {
+    // Use Provider API (server-side scraping)
+    const conn = await connectServerSideEvents<RunOutput>(
+      baseUrlMaker.scrapeAll(media, sourceOrder, embedOrder),
+      ["completed", "noOutput"]
+    );
+    const output = await conn.promise();
+    
+    if (output && isExtensionActiveCached())
+      await prepareStream(output.stream);
+    
+    return output;
+  } else {
+    // Use client-side scraping with extension
+    const providers = getProviders();
+    const output = await providers.runAll({
+      media,
+      sourceOrder,
+      embedOrder,
+      events: { init, start, update, discoverEmbeds }
+    });
+    
+    if (output && isExtensionActiveCached())
+      await prepareStream(output.stream);
+    
+    return output;
+  }
+};
+```
+
+#### Step 4: Stream Preparation (Extension Only)
+
+```typescript
+// From backend/extension/streams.ts
+export async function prepareStream(stream: Stream) {
+  await setDomainRule({
+    ruleId: RULE_IDS.PREPARE_STREAM,
+    targetDomains: extractDomainsFromStream(stream),
+    requestHeaders: buildHeadersFromStream(stream),
+  });
+}
+```
+
+This tells the extension:
+- Which domains to intercept (e.g., `cdn.streamingsite.com`)
+- What headers to add to requests
+- How to handle the requests
+
+#### Step 5: Video Playback
+
+```typescript
+// From components/player/hooks/useSourceSelection.ts
+if (isExtensionActiveCached()) await prepareStream(result.stream[0]);
+
+setSource(
+  convertRunoutputToSource({ stream: result.stream[0] }),
+  convertProviderCaption(result.stream[0].captions),
+  getSavedProgress(progressItems, meta)
+);
+```
+
+The player receives:
+- Stream URL (HLS playlist or direct file)
+- Captions
+- Saved progress
+
+HLS.js then:
+1. Requests the m3u8 playlist
+2. Extension intercepts and adds headers
+3. Downloads video segments
+4. Extension intercepts each segment request
+5. Plays the video
+
+---
+
+## Provider System
+
+### Provider Package (@p-stream/providers)
+
+This is a **separate GitHub repository** that contains:
+- Scraper implementations for various streaming sites
+- Embed scrapers
+- Provider metadata
+- Fetcher abstractions
+
+```typescript
+// Provider targets
+targets.BROWSER_EXTENSION  // Full access with extension
+targets.BROWSER           // Limited access without extension
+```
+
+### Fetcher Types
+
+#### 1. Standard Fetcher
+```typescript
+makeStandardFetcher(fetch)
+```
+- Uses native [fetch](file:///w:/filmy/fimply-frontend/src/backend/providers/fetchers.ts#107-123) API
+- For non-CORS requests
+- Public APIs, metadata
+
+#### 2. Extension Fetcher
+```typescript
+// From backend/providers/fetchers.ts
+export function makeExtensionFetcher() {
+  const fetcher: Fetcher = async (url, ops) => {
+    const result = await sendExtensionRequest<any>({
+      url,
+      ...ops,
+      body: convertBodyToObject(ops.body),
+      bodyType: getBodyTypeFromBody(ops.body),
+    });
+    
+    if (!result?.success) 
+      throw new Error(`extension error: ${result?.error}`);
+    
+    const res = result.response;
+    return {
+      body: res.body,
+      finalUrl: res.finalUrl,
+      statusCode: res.statusCode,
+      headers: makeFinalHeaders(ops.readHeaders, res.headers),
+    };
+  };
+  return fetcher;
+}
+```
+
+**How it works:**
+1. Frontend sends request details to extension
+2. Extension makes the request in privileged context
+3. Extension returns response to frontend
+4. No CORS issues!
+
+#### 3. Proxy Fetcher
+```typescript
+export function makeLoadBalancedSimpleProxyFetcher() {
+  const fetcher: Fetcher = async (a, b) => {
+    const currentFetcher = makeSimpleProxyFetcher(
+      getLoadbalancedProxyUrl(),
+      fetchButWithApiTokens
+    );
+    return currentFetcher(a, b);
+  };
+  return fetcher;
+}
+```
+
+**How it works:**
+1. Frontend sends request to proxy server
+2. Proxy server makes request to streaming site
+3. Proxy returns response
+4. Limited by proxy capabilities
+
+---
+
+## Request Flow
+
+### With Extension
+
+```
+User Action
+    ↓
+Frontend: getProviders() → makeExtensionFetcher()
+    ↓
+Frontend: providers.runSourceScraper()
+    ↓
+@p-stream/providers: Execute scraper logic
+    ↓
+Provider needs to fetch from streaming site
+    ↓
+Frontend: sendExtensionRequest({ url, headers, method })
+    ↓
+Extension: Receives request via @plasmohq/messaging
+    ↓
+Extension: Makes fetch() in privileged context
+    ↓
+Extension: Returns response
+    ↓
+Frontend: Receives stream URL
+    ↓
+Frontend: prepareStream(stream)
+    ↓
+Extension: Sets up declarativeNetRequest rules
+    ↓
+HLS Player: Requests m3u8 playlist
+    ↓
+Extension: Intercepts request, adds headers
+    ↓
+HLS Player: Downloads segments
+    ↓
+Extension: Intercepts each segment, adds headers
+    ↓
+Video Plays! 🎉
+```
+
+### Without Extension (Proxy Mode)
+
+```
+User Action
+    ↓
+Frontend: getProviders() → makeLoadBalancedSimpleProxyFetcher()
+    ↓
+Frontend: Check for Provider API URL
+    ↓
+Frontend: connectServerSideEvents(providerApiUrl)
+    ↓
+Provider API Server: Runs scraping server-side
+    ↓
+Provider API Server: Returns stream URL via SSE
+    ↓
+Frontend: Receives stream URL
+    ↓
+Frontend: setupM3U8Proxy()
+    ↓
+HLS Player: Requests m3u8 playlist via proxy
+    ↓
+Proxy Server: Forwards request
+    ↓
+HLS Player: Downloads segments via proxy
+    ↓
+Proxy Server: Forwards each segment
+    ↓
+Video Plays! 🎉 (but slower and less reliable)
+```
+
+---
+
+## Key Components
+
+### 1. Extension Messaging
+
+```typescript
+// From backend/extension/messaging.ts
+export async function sendExtensionRequest<T>(
+  ops: MessagesMetadata["makeRequest"]["req"]
+): Promise<ExtensionMakeRequestResponse<T> | null> {
+  return sendMessage("makeRequest", ops);
+}
+
+export async function setDomainRule(
+  ops: MessagesMetadata["prepareStream"]["req"]
+): Promise<MessagesMetadata["prepareStream"]["res"] | null> {
+  return sendMessage("prepareStream", ops);
+}
+
+export async function extensionInfo(): Promise<
+  MessagesMetadata["hello"]["res"] | null
+> {
+  const message = await sendMessage("hello", undefined, 500);
+  return message;
+}
+```
+
+**Message Types:**
+- `hello` - Check extension status
+- `makeRequest` - Make HTTP request via extension
+- [prepareStream](file:///w:/filmy/fimply-frontend/src/backend/extension/streams.ts#37-44) - Set up domain rules for streaming
+- `openPage` - Open page in new tab
+
+### 2. Provider Configuration
+
+```typescript
+// From setup/config.ts
+export interface RuntimeConfig {
+  PROXY_URLS: string[];           // Proxy server URLs
+  M3U8_PROXY_URLS: string[];      // M3U8 proxy URLs
+  BACKEND_URL: string | null;     // Backend API
+  // ... other config
+}
+```
+
+### 3. Source Selection Hook
+
+```typescript
+// From components/player/hooks/useSourceSelection.ts
+export function useSourceScraping(sourceId: string | null, routerId: string) {
+  const [request, run] = useAsyncFn(async () => {
+    if (!sourceId || !meta) return null;
+    
+    const scrapeMedia = metaToScrapeMedia(meta);
+    const providerApiUrl = getLoadbalancedProviderApiUrl();
+    
+    let result: SourcererOutput | undefined;
+    
+    if (providerApiUrl && !isExtensionActiveCached()) {
+      // Use server-side API
+      result = await connectServerSideEvents(
+        baseUrlMaker.scrapeSource(sourceId, scrapeMedia)
+      ).promise();
+    } else {
+      // Use client-side with extension
+      result = await getProviders().runSourceScraper({
+        id: sourceId,
+        media: scrapeMedia
+      });
+    }
+    
+    if (result.stream) {
+      if (isExtensionActiveCached()) 
+        await prepareStream(result.stream[0]);
+      
+      setSource(
+        convertRunoutputToSource({ stream: result.stream[0] }),
+        convertProviderCaption(result.stream[0].captions),
+        getSavedProgress(progressItems, meta)
+      );
+    }
+    
+    return result.embeds;
+  });
+  
+  return { run, loading, items, errored };
+}
+```
+
+---
+
+## State Management
+
+### Zustand Stores
+
+The app uses Zustand for state management:
+
+```
+stores/
+├── auth/           # Authentication state
+├── player/         # Player state (current video, progress, etc.)
+├── preferences/    # User preferences
+├── progress/       # Watch progress
+├── bookmarks/      # Saved content
+└── theme/          # Theme settings
+```
+
+### Player Store
+
+Key player state:
+- Current media metadata
+- Current source/embed
+- Playback progress
+- Caption settings
+- Quality settings
+
+---
+
+## Why Extension is Required for Streaming
+
+### The Core Problem: CORS
+
+When you try to fetch a video from `https://streaming-cdn.com/video.m3u8`:
+
+**Without Extension:**
+```
+Browser: "Hey streaming-cdn.com, can I get video.m3u8?"
+Server: "What's your Origin?"
+Browser: "https://pstream.mov"
+Server: "Sorry, I only allow requests from https://streaming-site.com"
+Browser: ❌ CORS Error
+```
+
+**With Extension:**
+```
+Frontend: "Extension, please fetch video.m3u8 for me"
+Extension: Makes request in privileged context
+Extension: Can modify headers, bypass CORS
+Extension: "Here's your video.m3u8"
+Frontend: ✅ Success!
+```
+
+### What the Extension Does
+
+1. **Intercepts Network Requests**
+   - Uses `declarativeNetRequest` API
+   - Matches requests to streaming domains
+   - Applies custom headers
+
+2. **Makes Privileged Requests**
+   - Can set any header (Referer, Origin, User-Agent)
+   - Not subject to CORS
+   - Can read response headers
+
+3. **Maintains Consistent IP**
+   - All requests from same IP
+   - Prevents rate limiting
+   - Avoids geo-blocking detection
+
+### Fallback: Proxy Servers
+
+Without extension, the app uses proxy servers:
+
+**Limitations:**
+- Slower (extra hop)
+- Less reliable (proxy can go down)
+- May be blocked by streaming sites
+- Limited header manipulation
+- Shared IP (rate limiting)
+
+**Configuration:**
+```typescript
+// From utils/proxyUrls.ts
+export function getProxyUrls() {
+  return getParsedUrls()
+    .filter((v) => v.type === "proxy")
+    .map((v) => v.url);
+}
+
+export function getM3U8ProxyUrls(): string[] {
+  return conf().M3U8_PROXY_URLS;
+}
+```
+
+---
+
+## Summary
+
+### The Streaming Flow (With Extension)
+
+1. **User selects a movie/show**
+2. **Extension is detected** via [extensionInfo()](file:///w:/filmy/fimply-frontend/src/backend/extension/messaging.ts#69-75)
+3. **Providers are configured** with [makeExtensionFetcher()](file:///w:/filmy/fimply-frontend/src/backend/providers/fetchers.ts#106-125)
+4. **Scraping begins** via `@p-stream/providers`
+5. **Extension makes requests** to streaming sites
+6. **Stream URL is obtained**
+7. **[prepareStream()](file:///w:/filmy/fimply-frontend/src/backend/extension/streams.ts#37-44) is called** to set up domain rules
+8. **Extension configures header injection** for streaming domains
+9. **HLS player loads playlist** - extension adds headers
+10. **Video segments download** - extension adds headers to each
+11. **Video plays smoothly!**
+
+### Why Extension is Critical
+
+| Feature | With Extension | Without Extension |
+|---------|---------------|-------------------|
+| CORS Bypass | ✅ Full | ❌ Proxy only |
+| Header Control | ✅ Complete | ⚠️ Limited |
+| Speed | ✅ Fast | ⚠️ Slower |
+| Reliability | ✅ High | ⚠️ Medium |
+| Provider Support | ✅ All | ⚠️ Limited |
+| IP Consistency | ✅ Yes | ❌ No |
+
+### Key Files to Understand
+
+1. **[backend/providers/providers.ts](file:///w:/filmy/fimply-frontend/src/backend/providers/providers.ts)** - Provider configuration
+2. **[backend/extension/messaging.ts](file:///w:/filmy/fimply-frontend/src/backend/extension/messaging.ts)** - Extension communication
+3. **[backend/extension/streams.ts](file:///w:/filmy/fimply-frontend/src/backend/extension/streams.ts)** - Stream preparation
+4. **[backend/providers/fetchers.ts](file:///w:/filmy/fimply-frontend/src/backend/providers/fetchers.ts)** - Fetcher implementations
+5. **[hooks/useProviderScrape.tsx](file:///w:/filmy/fimply-frontend/src/hooks/useProviderScrape.tsx)** - Scraping logic
+6. **[components/player/hooks/useSourceSelection.ts](file:///w:/filmy/fimply-frontend/src/components/player/hooks/useSourceSelection.ts)** - Source selection
+
+---
+
+## Conclusion
+
+The P-Stream frontend is a sophisticated React application that:
+
+- Uses **@p-stream/providers** for scraping streaming sources
+- **Requires a browser extension** for full functionality to bypass CORS
+- Falls back to **proxy servers** when extension is unavailable
+- Uses **Zustand** for state management
+- Employs **HLS.js** for video playback
+- Communicates with extension via **@plasmohq/messaging**
+
+The extension is the **critical component** that enables:
+- CORS bypass
+- Header manipulation
+- Consistent IP requests
+- Full provider support
+
+Without it, the app is limited to proxy-based streaming, which is slower and less reliable.
